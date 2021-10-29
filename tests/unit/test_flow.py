@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import time
 from typing import List
@@ -20,7 +21,7 @@ from aqueduct.metrics import MAIN_PROCESS
 from aqueduct.shm import _shm_ref_counter
 from aqueduct.task import BaseTask
 from tests.unit.conftest import (
-    Task,
+    SleepHandler1, Task,
     run_flow,
     terminate_worker,
 )
@@ -303,19 +304,52 @@ async def test_segfault_due_to_share_field_in_handler(array, flow_for_shared_arr
     assert t.array[0] == array[-1]  # noqa
 
 
-async def test_right_ref_count_for_parallel_tasks(array_sh_data, simple_flow):
-    assert array_sh_data.shm_wrapper.ref_count == 1
+@pytest.fixture
+async def perf_flow(loop):
+    log = logging.getLogger('aqueduct')
+    log.setLevel(logging.INFO)
 
+    flow = Flow(
+        FlowStep(SleepHandler1(0.005), nprocs=8),
+        FlowStep(SleepHandler1(0.001)),
+        FlowStep(SleepHandler1(0.005), nprocs=8),
+    )
+    flow.start()
+    yield flow
+
+
+async def test_perf_without_shm(perf_flow):
+    """
+    execution takes ~ 84 ms
+    """
     tasks = [BaseTask() for _ in range(50)]
-    for t in tasks:
-        t.sh_array = array_sh_data
-    await asyncio.gather(*[simple_flow.process(t) for t in tasks])
+
+    t0 = time.time()
+    await asyncio.gather(*[perf_flow.process(t) for t in tasks])
+    t1 = time.time()
+    print(f'total time: {t1-t0}')
 
     # to run gc
     tasks = [BaseTask() for _ in range(len(tasks))]
-    await asyncio.gather(*[simple_flow.process(t) for t in tasks])
+    await asyncio.gather(*[perf_flow.process(t) for t in tasks])
 
-    assert array_sh_data.shm_wrapper.ref_count == 1
+
+async def test_perf_with_shared_lock(array_sh_data, perf_flow):
+    """
+    execution takes from 180 to 320 ms
+    """
+    tasks = [BaseTask() for _ in range(50)]
+    for t in tasks:
+        t.sh_array = array_sh_data
+
+    t0 = time.time()
+    await asyncio.gather(*[perf_flow.process(t) for t in tasks])
+    t1 = time.time()
+    print(f'total time: {t1-t0}')
+
+    # to run gc
+    tasks = [BaseTask() for _ in range(len(tasks))]
+    await asyncio.gather(*[perf_flow.process(t) for t in tasks])
 
 
 async def test_right_ref_count_for_seq_tasks(simple_flow, array):
